@@ -12,6 +12,7 @@ $ffi->lib('SDL2_image');
 # Функции SDL
 $ffi->attach( SDL_Init               => ['uint']                     => 'int' );
 $ffi->attach( SDL_GetError           => []                           => 'string' );
+$ffi->attach( SDL_SetHint            => ['string', 'string']          => 'int' );   # для nearest-фильтрации
 $ffi->attach( SDL_CreateWindow       => ['string','int','int','int','int','uint'] => 'opaque' );
 $ffi->attach( SDL_CreateRenderer     => ['opaque','int','uint']      => 'opaque' );
 $ffi->attach( SDL_SetRenderDrawColor => ['opaque','uint8','uint8','uint8','uint8'] => 'int' );
@@ -36,9 +37,12 @@ $ffi->attach( SDL_RenderCopyEx        => ['opaque','opaque','opaque','opaque','d
 die "SDL_Init failed: " . SDL_GetError() if SDL_Init(0x00000020) != 0;
 die "IMG_Init failed"                unless IMG_Init(2) & 2;   # PNG
 
-# Окно NES-разрешения
-my $window_w = 256;
-my $window_h = 224;
+# Устанавливаем nearest-фильтрацию (пиксели без сглаживания)
+SDL_SetHint("SDL_HINT_RENDER_SCALE_QUALITY", "0");
+
+my $scale   = 3;
+my $window_w = 256 * $scale;
+my $window_h = 224 * $scale;
 my $window   = SDL_CreateWindow("Crimson Dragon 3", 100, 100, $window_w, $window_h, 0x00000004);
 my $renderer = SDL_CreateRenderer($window, -1, 0);
 die "Renderer failed" unless $renderer;
@@ -56,14 +60,19 @@ my $map_h = 160;
 my $map_texture = SDL_CreateTextureFromSurface($renderer, $map_surface);
 SDL_FreeSurface($map_surface);
 
-# Положение карты: центрируем с учётом 4 пикселей сверху и слева
-my $map_x = int(($window_w - $map_w) / 2);  # 4
-my $map_y = 4;                              # 4 сверху, остальное снизу (60)
+# Логические отступы карты (в пикселях 256x224): слева 4, сверху 4
+my $map_x = 4;
+my $map_y = 4;
 
-# Прямоугольник для карты
+# Прямоугольник для карты (экранные координаты с масштабом)
 my $map_rect = malloc(16);
 {
-    my $packed = pack('iiii', $map_x, $map_y, $map_w, $map_h);
+    my $packed = pack('iiii',
+        $map_x * $scale,
+        $map_y * $scale,
+        $map_w * $scale,
+        $map_h * $scale
+    );
     my $ptr = $ffi->cast('string' => 'opaque', $packed);
     memcpy($map_rect, $ptr, 16);
 }
@@ -88,14 +97,14 @@ my $attack_fh = 40;
 my $attack_frames = 3;
 my $attack_frame_duration = 6;
 
-# Персонаж (координаты в пикселях карты)
+# Персонаж (логические координаты, в пикселях карты 248x160)
 my %player = (
-    x          => 100,       # начальная позиция на карте
+    x          => 100,
     y          => 100,
-    frame      => 3,          # стоячий кадр
+    frame      => 3,
     anim_timer => 0,
     direction  => 1,
-    speed      => 1.5,        # медленнее для маленького экрана
+    speed      => 1.5,
     moving     => 0,
     is_attacking => 0,
     attack_frame => 0,
@@ -111,7 +120,7 @@ my $keys_buf = malloc(512);
 die "malloc keys failed" unless $keys_buf;
 
 my $running = 1;
-print "Crimson Dragon 3 запущена\n";
+print "Crimson Dragon 3 запущена (x3 масштаб)\n";
 print "Управление: стрелки или WASD\n";
 print "Атака: клавиша A (или J)\n";
 print "Закрытие: крестик или Esc\n\n";
@@ -191,7 +200,7 @@ while ($running) {
         }
     }
 
-    # Границы (в пределах карты)
+    # Границы (в логических координатах карты)
     my $pw = 36;  # ширина спрайта
     my $ph = 40;  # высота спрайта
     $player{x} = 0  if $player{x} < 0;
@@ -207,20 +216,16 @@ while ($running) {
     SDL_RenderCopy($renderer, $map_texture, undef, $map_rect);
 
     # Персонаж
-    my ($current_texture, $src_w, $src_h, $dst_w, $dst_h, $frame_index);
+    my ($current_texture, $src_w, $src_h, $frame_index);
     if ($player{is_attacking}) {
         $current_texture = $attack_texture;
         $src_w = $attack_fw;
         $src_h = $attack_fh;
-        $dst_w = $src_w;   # отображаем в исходном размере
-        $dst_h = $src_h;
         $frame_index = $player{attack_frame};
     } else {
         $current_texture = $billy_texture;
         $src_w = $billy_fw;
         $src_h = $billy_fh;
-        $dst_w = $src_w;
-        $dst_h = $src_h;
         $frame_index = $player{frame};
     }
 
@@ -228,9 +233,12 @@ while ($running) {
     my $src_data_ptr = $ffi->cast('string' => 'opaque', $packed_src);
     memcpy($src_rect, $src_data_ptr, 16);
 
-    # Положение на экране: смещение карты + позиция персонажа
-    my $screen_x = int($map_x + $player{x});
-    my $screen_y = int($map_y + $player{y});
+    # Экранные координаты с масштабом
+    my $screen_x = ($map_x + $player{x}) * $scale;
+    my $screen_y = ($map_y + $player{y}) * $scale;
+    my $dst_w = $src_w * $scale;
+    my $dst_h = $src_h * $scale;
+
     my $packed_dst = pack('iiii', $screen_x, $screen_y, $dst_w, $dst_h);
     my $dst_data_ptr = $ffi->cast('string' => 'opaque', $packed_dst);
     memcpy($dst_rect, $dst_data_ptr, 16);
