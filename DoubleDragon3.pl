@@ -9,10 +9,9 @@ my $ffi = FFI::Platypus->new(api => 2);
 $ffi->lib('SDL2');
 $ffi->lib('SDL2_image');
 
-# Функции SDL
 $ffi->attach( SDL_Init               => ['uint']                     => 'int' );
 $ffi->attach( SDL_GetError           => []                           => 'string' );
-$ffi->attach( SDL_SetHint            => ['string', 'string']          => 'int' );   # для nearest-фильтрации
+$ffi->attach( SDL_SetHint            => ['string', 'string']         => 'int' );
 $ffi->attach( SDL_CreateWindow       => ['string','int','int','int','int','uint'] => 'opaque' );
 $ffi->attach( SDL_CreateRenderer     => ['opaque','int','uint']      => 'opaque' );
 $ffi->attach( SDL_SetRenderDrawColor => ['opaque','uint8','uint8','uint8','uint8'] => 'int' );
@@ -27,7 +26,6 @@ $ffi->attach( SDL_Quit               => []                           => 'void' )
 $ffi->attach( SDL_GetKeyboardState   => ['opaque']                   => 'opaque' );
 $ffi->attach( SDL_FreeSurface        => ['opaque']                   => 'void' );
 
-# SDL_image
 $ffi->attach( IMG_Load                => ['string']                  => 'opaque' );
 $ffi->attach( IMG_Init                => ['int']                     => 'int' );
 $ffi->attach( SDL_CreateTextureFromSurface => ['opaque','opaque']    => 'opaque' );
@@ -37,71 +35,73 @@ $ffi->attach( SDL_RenderCopyEx        => ['opaque','opaque','opaque','opaque','d
 die "SDL_Init failed: " . SDL_GetError() if SDL_Init(0x00000020) != 0;
 die "IMG_Init failed"                unless IMG_Init(2) & 2;   # PNG
 
-# Устанавливаем nearest-фильтрацию (пиксели без сглаживания)
-SDL_SetHint("SDL_HINT_RENDER_SCALE_QUALITY", "0");
+SDL_SetHint("SDL_HINT_RENDER_SCALE_QUALITY", "0");  # nearest-фильтр
 
 my $scale   = 3;
-my $window_w = 256 * $scale;
-my $window_h = 224 * $scale;
-my $window   = SDL_CreateWindow("Crimson Dragon 3", 100, 100, $window_w, $window_h, 0x00000004);
+my $window_w = 256 * $scale;       # 768
+my $window_h = 224 * $scale;       # 672
+my $window   = SDL_CreateWindow("Crimson Dragon 3 (NTSC)", 100, 100, $window_w, $window_h, 0x00000004);
 my $renderer = SDL_CreateRenderer($window, -1, 0);
 die "Renderer failed" unless $renderer;
 
-# Память для событий
 my $event_ptr = malloc(56);
 die "malloc event failed" unless $event_ptr;
 
-# ---------------------- Загрузка карты ----------------------
-my $map_surface = IMG_Load("assets/map/map01.png");
-die "Не удалось загрузить карту: " . SDL_GetError() unless $map_surface;
+# ---------------------- Тайлы и карта ----------------------
+my $tile_size = 8;
+my $map_cols  = 31;   # 248 / 8
+my $map_rows  = 20;   # 160 / 8
 
-my $map_w = 248;
-my $map_h = 160;
-my $map_texture = SDL_CreateTextureFromSurface($renderer, $map_surface);
-SDL_FreeSurface($map_surface);
+# Загружаем тайлсет (вертикальный)
+my $tileset_surface = IMG_Load("assets/map/tileset.png");
+die "No tileset: " . SDL_GetError() unless $tileset_surface;
+my $tileset_tex = SDL_CreateTextureFromSurface($renderer, $tileset_surface);
+SDL_FreeSurface($tileset_surface);
 
-# Логические отступы карты (в пикселях 256x224): слева 4, сверху 4
+# Загружаем карту из текстового файла
+my @map;
+open(my $fh, '<', "assets/map/map01.txt") or die "Map file missing: $!";
+while (<$fh>) {
+    chomp;
+    s/^\s+//; s/\s+$//;
+    next if $_ eq '';
+    my @row = split /\s+/, $_;
+    die "Wrong number of columns in map line" if @row != $map_cols;
+    push @map, \@row;
+}
+close $fh;
+die "Map must have $map_rows rows" if @map != $map_rows;
+
+# Логические отступы карты (как в NES)
 my $map_x = 4;
 my $map_y = 4;
 
-# Прямоугольник для карты (экранные координаты с масштабом)
-my $map_rect = malloc(16);
-{
-    my $packed = pack('iiii',
-        $map_x * $scale,
-        $map_y * $scale,
-        $map_w * $scale,
-        $map_h * $scale
-    );
-    my $ptr = $ffi->cast('string' => 'opaque', $packed);
-    memcpy($map_rect, $ptr, 16);
-}
+# Прямоугольники для тайлов (используем в цикле)
+my $src_tile = malloc(16);
+my $dst_tile = malloc(16);
 
-# ---------------------- Загрузка спрайтов ----------------------
+# ---------------------- Спрайты Билли ----------------------
 my $base = "assets/sprites/Billy";
 
-my $billy_surface = IMG_Load("$base/Billy.png");
-die "Не удалось загрузить Billy.png: " . SDL_GetError() unless $billy_surface;
-my $billy_texture = SDL_CreateTextureFromSurface($renderer, $billy_surface);
-SDL_FreeSurface($billy_surface);
-my $billy_fw = 36;
-my $billy_fh = 40;
-my $billy_frames = 4;
+my $billy_surf = IMG_Load("$base/Billy.png") or die "Billy.png: " . SDL_GetError();
+my $billy_tex  = SDL_CreateTextureFromSurface($renderer, $billy_surf);
+SDL_FreeSurface($billy_surf);
 
-my $attack_surface = IMG_Load("$base/Attack_A.png");
-die "Не удалось загрузить Attack_A.png: " . SDL_GetError() unless $attack_surface;
-my $attack_texture = SDL_CreateTextureFromSurface($renderer, $attack_surface);
-SDL_FreeSurface($attack_surface);
-my $attack_fw = 36;
-my $attack_fh = 40;
+my $attack_surf = IMG_Load("$base/Attack_A.png") or die "Attack_A.png: " . SDL_GetError();
+my $attack_tex  = SDL_CreateTextureFromSurface($renderer, $attack_surf);
+SDL_FreeSurface($attack_surf);
+
+my $frame_w       = 36;
+my $frame_h       = 40;
+my $billy_frames  = 4;
 my $attack_frames = 3;
-my $attack_frame_duration = 6;
+my $attack_dur    = 6;
 
-# Персонаж (логические координаты, в пикселях карты 248x160)
+# ---------------------- Персонаж ----------------------
 my %player = (
     x          => 100,
     y          => 100,
-    frame      => 3,
+    frame      => 3,      # стойка
     anim_timer => 0,
     direction  => 1,
     speed      => 1.5,
@@ -111,37 +111,49 @@ my %player = (
     attack_timer => 0,
 );
 
-# Прямоугольники для спрайтов
+# Прямоугольники для спрайта персонажа
 my $src_rect = malloc(16);
 my $dst_rect = malloc(16);
 
 # Буфер клавиатуры
 my $keys_buf = malloc(512);
-die "malloc keys failed" unless $keys_buf;
 
 my $running = 1;
-print "Crimson Dragon 3 запущена (x3 масштаб)\n";
-print "Управление: стрелки или WASD\n";
-print "Атака: клавиша A (или J)\n";
-print "Закрытие: крестик или Esc\n\n";
+print "NTSC mode (256x224 x3) started\n";
+print "Arrows/WASD move, A/J attack, Esc close\n\n";
 
 my $event_str = "\0" x 56;
 my $event_str_ptr = $ffi->cast('string' => 'opaque', $event_str);
 
+# ---------------------- Функция коллизии с тайлами ----------------------
+sub tile_collision {
+    my ($x, $y, $w, $h) = @_;
+    my $left   = int($x / $tile_size);
+    my $right  = int(($x + $w - 1) / $tile_size);
+    my $top    = int($y / $tile_size);
+    my $bottom = int(($y + $h - 1) / $tile_size);
+
+    for my $row ($top..$bottom) {
+        for my $col ($left..$right) {
+            # За границей карты – считаем стеной
+            return 1 if $row < 0 || $row >= $map_rows || $col < 0 || $col >= $map_cols;
+            # Тайл не 0 – стена
+            return 1 if $map[$row][$col] != 0;
+        }
+    }
+    return 0;
+}
+
+# ---------------------- Основной цикл ----------------------
 while ($running) {
-    # ------------------- Обработка событий --------------------
+    # ----- События -----
     while (SDL_PollEvent($event_ptr)) {
         memcpy($event_str_ptr, $event_ptr, 56);
         my $type = unpack('V', substr($event_str, 0, 4));
-
-        if ($type == 0x100) {          # SDL_QUIT
-            $running = 0;
-        }
-        elsif ($type == 0x300) {       # SDL_KEYDOWN
+        if ($type == 0x100) { $running = 0; }
+        elsif ($type == 0x300) {
             my $key = unpack('V', substr($event_str, 20, 4));
-            if ($key == 27) {          # Esc
-                $running = 0;
-            }
+            if ($key == 27) { $running = 0; }   # Esc
             if (($key == 97 || $key == 106) && !$player{is_attacking}) {
                 $player{is_attacking} = 1;
                 $player{attack_frame} = 0;
@@ -150,7 +162,7 @@ while ($running) {
         }
     }
 
-    # ------------------- Движение (если не атакуем) --------------------
+    # ----- Движение -----
     if (!$player{is_attacking}) {
         my $keys_ptr = SDL_GetKeyboardState(undef);
         my $keys_str = "\0" x 512;
@@ -164,23 +176,37 @@ while ($running) {
 
         $player{moving} = 0;
         my $dx = 0; my $dy = 0;
-        $dx -= 1 if ($left);
-        $dx += 1 if ($right);
-        $dy -= 1 if ($up);
-        $dy += 1 if ($down);
+        $dx -= 1 if $left;
+        $dx += 1 if $right;
+        $dy -= 1 if $up;
+        $dy += 1 if $down;
 
         if ($dx || $dy) {
             $player{moving} = 1;
-            $player{x} += $dx * $player{speed};
-            $player{y} += $dy * $player{speed} * 0.7;
+            # Раздельная проверка по осям
+            my $new_x = $player{x} + $dx * $player{speed};
+            my $new_y = $player{y} + $dy * $player{speed} * 0.7;
+
+            # Хитбокс персонажа (немного уменьшаем)
+            my $hb_w = 24;
+            my $hb_h = 36;
+            my $hb_x = $new_x + 6;   # отступы от левого края спрайта
+            my $hb_y = $new_y + 2;
+
+            if (!tile_collision($hb_x, $player{y} + 2, $hb_w, $hb_h)) {
+                $player{x} = $new_x;
+            }
+            if (!tile_collision($player{x} + 6, $hb_y, $hb_w, $hb_h)) {
+                $player{y} = $new_y;
+            }
             $player{direction} = $dx if $dx != 0;
         }
     }
 
-    # ------------------- Анимация --------------------
+    # ----- Анимация -----
     if ($player{is_attacking}) {
         $player{attack_timer}++;
-        if ($player{attack_timer} >= $attack_frame_duration) {
+        if ($player{attack_timer} >= $attack_dur) {
             $player{attack_timer} = 0;
             $player{attack_frame}++;
             if ($player{attack_frame} >= $attack_frames) {
@@ -200,58 +226,75 @@ while ($running) {
         }
     }
 
-    # Границы (в логических координатах карты)
-    my $pw = 36;  # ширина спрайта
-    my $ph = 40;  # высота спрайта
-    $player{x} = 0  if $player{x} < 0;
-    $player{x} = $map_w - $pw if $player{x} > $map_w - $pw;
-    $player{y} = 0  if $player{y} < 0;
-    $player{y} = $map_h - $ph if $player{y} > $map_h - $ph;
+    # Ограничение в пределах карты (на всякий случай)
+    $player{x} = 0 if $player{x} < 0;
+    $player{x} = 248 - 36 if $player{x} > 212;
+    $player{y} = 0 if $player{y} < 0;
+    $player{y} = 160 - 40 if $player{y} > 120;
 
-    # ------------------- Рендер --------------------
+    # ----- Рендер -----
     SDL_SetRenderDrawColor($renderer, 0, 0, 0, 255);
     SDL_RenderClear($renderer);
 
-    # Карта
-    SDL_RenderCopy($renderer, $map_texture, undef, $map_rect);
+    # Рисуем тайлы карты
+    for my $row (0..$map_rows-1) {
+        for my $col (0..$map_cols-1) {
+            my $id = $map[$row][$col];
+            next if $id <= 0;   # пустые не рисуем (у нас только стены)
+            my $src_x = 0;
+            my $src_y = ($id - 1) * $tile_size;  # индексы начинаются с 1? Можно и 0 как пустой
+            # Если индексы тайлов в файле начинаются с 1, то здесь корректируем. Лучше в файле: 0=пусто, 1=первый блок и т.д.
+            # Тогда строчка: my $src_y = $id * $tile_size;  если 0 пустой, 1 первый тайл. Используем это.
+            # Переделаем: 
+            my $ty = ($id) * $tile_size;  # если 0 – пропустили, 1 -> 8, 2 -> 16...
+            my $packed_src = pack('iiii', 0, $ty, $tile_size, $tile_size);
+            my $src_ptr = $ffi->cast('string' => 'opaque', $packed_src);
+            memcpy($src_tile, $src_ptr, 16);
 
-    # Персонаж
-    my ($current_texture, $src_w, $src_h, $frame_index);
-    if ($player{is_attacking}) {
-        $current_texture = $attack_texture;
-        $src_w = $attack_fw;
-        $src_h = $attack_fh;
-        $frame_index = $player{attack_frame};
-    } else {
-        $current_texture = $billy_texture;
-        $src_w = $billy_fw;
-        $src_h = $billy_fh;
-        $frame_index = $player{frame};
+            my $screen_x = ($map_x + $col * $tile_size) * $scale;
+            my $screen_y = ($map_y + $row * $tile_size) * $scale;
+            my $packed_dst = pack('iiii', $screen_x, $screen_y, $tile_size * $scale, $tile_size * $scale);
+            my $dst_ptr = $ffi->cast('string' => 'opaque', $packed_dst);
+            memcpy($dst_tile, $dst_ptr, 16);
+
+            SDL_RenderCopy($renderer, $tileset_tex, $src_tile, $dst_tile);
+        }
     }
 
-    my $packed_src = pack('iiii', $frame_index * $src_w, 0, $src_w, $src_h);
-    my $src_data_ptr = $ffi->cast('string' => 'opaque', $packed_src);
-    memcpy($src_rect, $src_data_ptr, 16);
+    # Рисуем персонажа
+    my ($cur_tex, $cur_fw, $cur_fh, $frame_idx);
+    if ($player{is_attacking}) {
+        $cur_tex = $attack_tex;
+        $cur_fw  = $frame_w;
+        $cur_fh  = $frame_h;
+        $frame_idx = $player{attack_frame};
+    } else {
+        $cur_tex = $billy_tex;
+        $cur_fw  = $frame_w;
+        $cur_fh  = $frame_h;
+        $frame_idx = $player{frame};
+    }
 
-    # Экранные координаты с масштабом
+    my $src_packed = pack('iiii', $frame_idx * $cur_fw, 0, $cur_fw, $cur_fh);
+    my $src_ptr2 = $ffi->cast('string' => 'opaque', $src_packed);
+    memcpy($src_rect, $src_ptr2, 16);
+
     my $screen_x = ($map_x + $player{x}) * $scale;
     my $screen_y = ($map_y + $player{y}) * $scale;
-    my $dst_w = $src_w * $scale;
-    my $dst_h = $src_h * $scale;
-
-    my $packed_dst = pack('iiii', $screen_x, $screen_y, $dst_w, $dst_h);
-    my $dst_data_ptr = $ffi->cast('string' => 'opaque', $packed_dst);
-    memcpy($dst_rect, $dst_data_ptr, 16);
+    my $dst_packed = pack('iiii', $screen_x, $screen_y, $cur_fw * $scale, $cur_fh * $scale);
+    my $dst_ptr2 = $ffi->cast('string' => 'opaque', $dst_packed);
+    memcpy($dst_rect, $dst_ptr2, 16);
 
     my $flip = ($player{direction} < 0) ? 1 : 0;
-    SDL_RenderCopyEx($renderer, $current_texture, $src_rect, $dst_rect, 0, undef, $flip);
+    SDL_RenderCopyEx($renderer, $cur_tex, $src_rect, $dst_rect, 0, undef, $flip);
 
     SDL_RenderPresent($renderer);
     SDL_Delay(16);
 }
 
 # Очистка
-free($map_rect);
+free($src_tile);
+free($dst_tile);
 free($src_rect);
 free($dst_rect);
 free($event_ptr);
@@ -259,4 +302,4 @@ free($keys_buf);
 SDL_DestroyRenderer($renderer);
 SDL_DestroyWindow($window);
 SDL_Quit();
-print "Игра закрыта.\n";
+print "Game closed.\n";
