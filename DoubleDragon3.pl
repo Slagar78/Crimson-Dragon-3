@@ -135,10 +135,10 @@ sub tile_collision {
 
     for my $row ($top..$bottom) {
         for my $col ($left..$right) {
-            # За границей карты – считаем стеной
+            # За границей карты – стена
             return 1 if $row < 0 || $row >= $map_rows || $col < 0 || $col >= $map_cols;
-            # Тайл не 0 – стена
-            return 1 if $map[$row][$col] != 0;
+            # Все тайлы проходимы (строка ниже закомментирована)
+            # return 1 if $map[$row][$col] != 0;
         }
     }
     return 0;
@@ -237,17 +237,17 @@ while ($running) {
     SDL_RenderClear($renderer);
 
     # Рисуем тайлы карты
+    my $ts_cols = 64;   # ← ВАЖНО: ширина тайлсета в тайлах (как в редакторе)
     for my $row (0..$map_rows-1) {
         for my $col (0..$map_cols-1) {
             my $id = $map[$row][$col];
-            next if $id <= 0;   # пустые не рисуем (у нас только стены)
-            my $src_x = 0;
-            my $src_y = ($id - 1) * $tile_size;  # индексы начинаются с 1? Можно и 0 как пустой
-            # Если индексы тайлов в файле начинаются с 1, то здесь корректируем. Лучше в файле: 0=пусто, 1=первый блок и т.д.
-            # Тогда строчка: my $src_y = $id * $tile_size;  если 0 пустой, 1 первый тайл. Используем это.
-            # Переделаем: 
-            my $ty = ($id) * $tile_size;  # если 0 – пропустили, 1 -> 8, 2 -> 16...
-            my $packed_src = pack('iiii', 0, $ty, $tile_size, $tile_size);
+            next if $id <= 0;   # пустые не рисуем
+
+            # Правильные координаты в сетке 64x64
+            my $src_x = ($id % $ts_cols) * $tile_size;
+            my $src_y = int($id / $ts_cols) * $tile_size;
+
+            my $packed_src = pack('iiii', $src_x, $src_y, $tile_size, $tile_size);
             my $src_ptr = $ffi->cast('string' => 'opaque', $packed_src);
             memcpy($src_tile, $src_ptr, 16);
 
